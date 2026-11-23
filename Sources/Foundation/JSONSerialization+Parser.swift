@@ -109,7 +109,6 @@ internal struct JSONParser {
         }
 
         var array = [JSONValue]()
-        array.reserveCapacity(10)
 
         // parse values
         while true {
@@ -163,7 +162,6 @@ internal struct JSONParser {
         }
 
         var object = [String: JSONValue]()
-        object.reserveCapacity(20)
 
         while true {
             let key = try reader.readString()
