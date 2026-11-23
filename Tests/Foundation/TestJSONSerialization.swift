@@ -68,6 +68,20 @@ extension TestJSONSerialization {
         }
     }
 
+    func test_JSONObjectWithData_errorPriority() {
+        // Syntax errors come first, then a disallowed fragment, then a number that can't be represented.
+        let subjects: [(String, String)] = [
+            ("[1.1e547] x", "Invalid value around character 10."),
+            ("1.1e547", "JSON text did not start with array or object and option to allow fragments not set."),
+            ("[1.1e547]", "Number 1.1e547 is not representable in Swift."),
+        ]
+        for (subject, message) in subjects {
+            XCTAssertThrowsError(try JSONSerialization.jsonObject(with: Data(subject.utf8), options: [])) { error in
+                XCTAssertEqual((error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String, message, subject)
+            }
+        }
+    }
+
 }
 
 //MARK: - JSONDeserialization

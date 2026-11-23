@@ -186,12 +186,12 @@ open class JSONSerialization : NSObject {
      */
     open class func jsonObject(with data: Data, options opt: ReadingOptions = []) throws -> Any {
         do {
-            let jsonValue = try data.withUnsafeBytes { (ptr) -> JSONValue in
+            return try data.withUnsafeBytes { (ptr) -> Any in
                 let (encoding, advanceBy) = JSONSerialization.detectEncoding(ptr)
                 
                 if encoding == .utf8 {
                     // we got utf8... happy path
-                    var parser = JSONParser(bytes: Array(ptr[advanceBy..<ptr.count]))
+                    var parser = JSONParser(bytes: Array(ptr[advanceBy..<ptr.count]), options: opt)
                     return try parser.parse()
                 }
                 
@@ -199,15 +199,9 @@ open class JSONSerialization : NSObject {
                     throw JSONError.cannotConvertInputDataToUTF8
                 }
                 
-                var parser = JSONParser(bytes: Array(utf8String.utf8))
+                var parser = JSONParser(bytes: Array(utf8String.utf8), options: opt)
                 return try parser.parse()
             }
-            
-            if jsonValue.isValue, !opt.contains(.fragmentsAllowed) {
-                throw JSONError.singleFragmentFoundButNotAllowed
-            }
-            
-            return try jsonValue.toObjcRepresentation(options: opt)
         } catch let error as JSONError {
             switch error {
             case .cannotConvertInputDataToUTF8:
@@ -627,88 +621,6 @@ private struct JSONWriter {
         }
     }
 
-}
-
-enum JSONValue: Equatable {
-    case string(String)
-    case number(String)
-    case bool(Bool)
-    case null
-
-    case array([JSONValue])
-    case object([String: JSONValue])
-}
-
-extension JSONValue {
-    var isValue: Bool {
-        switch self {
-        case .array, .object:
-            return false
-        case .null, .number, .string, .bool:
-            return true
-        }
-    }
-    
-    var isContainer: Bool {
-        switch self {
-        case .array, .object:
-            return true
-        case .null, .number, .string, .bool:
-            return false
-        }
-    }
-}
-
-extension JSONValue {
-    var debugDataTypeDescription: String {
-        switch self {
-        case .array:
-            return "an array"
-        case .bool:
-            return "bool"
-        case .number:
-            return "a number"
-        case .string:
-            return "a string"
-        case .object:
-            return "a dictionary"
-        case .null:
-            return "null"
-        }
-    }
-}
-
-private extension JSONValue {
-    func toObjcRepresentation(options: JSONSerialization.ReadingOptions) throws -> Any {
-        switch self {
-        case .array(let values):
-            let array = try values.map { try $0.toObjcRepresentation(options: options) }
-            if !options.contains(.mutableContainers) {
-                return array
-            }
-            return NSMutableArray(array: array, copyItems: false)
-        case .object(let object):
-            let dictionary = try object.mapValues { try $0.toObjcRepresentation(options: options) }
-            if !options.contains(.mutableContainers) {
-                return dictionary
-            }
-            return NSMutableDictionary(dictionary: dictionary, copyItems: false)
-        case .bool(let bool):
-            return NSNumber(value: bool)
-        case .number(let string):
-            guard let number = NSNumber.fromJSONNumber(string) else {
-                throw JSONError.numberIsNotRepresentableInSwift(parsed: string)
-            }
-            return number
-        case .null:
-            return NSNull()
-        case .string(let string):
-            if options.contains(.mutableLeaves) {
-                return NSMutableString(string: string)
-            }
-            return string
-        }
-    }
 }
 
 extension NSNumber {

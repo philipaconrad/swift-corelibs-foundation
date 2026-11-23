@@ -14,13 +14,21 @@
 internal struct JSONParser {
     var reader: DocumentReader
     var depth: Int = 0
+    let options: JSONSerialization.ReadingOptions
+    // Members of the containers being parsed. Each container is built once its member count is known.
+    var valueStack: [Any] = []
+    var memberStack: [(String, Any)] = []
+    // The first number that NSNumber can't represent. We report it after the whole document parses, so syntax
+    // errors take priority.
+    var unrepresentableNumber: String?
 
-    init(bytes: [UInt8]) {
+    init(bytes: [UInt8], options: JSONSerialization.ReadingOptions) {
         self.reader = DocumentReader(array: bytes)
+        self.options = options
     }
 
-    mutating func parse() throws -> JSONValue {
-        try reader.consumeWhitespace()
+    mutating func parse() throws -> Any {
+        let first = try reader.consumeWhitespace()
         let value = try self.parseValue()
         #if DEBUG
         defer {
@@ -42,38 +50,53 @@ internal struct JSONParser {
             }
         }
 
+        if first != ._openbrace, first != ._openbracket, !options.contains(.fragmentsAllowed) {
+            throw JSONError.singleFragmentFoundButNotAllowed
+        }
+        if let number = unrepresentableNumber {
+            throw JSONError.numberIsNotRepresentableInSwift(parsed: number)
+        }
         return value
     }
 
     // MARK: Generic Value Parsing
 
-    mutating func parseValue() throws -> JSONValue {
+    mutating func parseValue() throws -> Any {
         var whitespace = 0
         while let byte = reader.peek(offset: whitespace) {
             switch byte {
             case UInt8(ascii: "\""):
                 reader.moveReaderIndex(forwardBy: whitespace)
-                return .string(try reader.readString())
+                let string = try reader.readString()
+                if options.contains(.mutableLeaves) {
+                    return NSMutableString(string: string)
+                }
+                return string
             case ._openbrace:
                 reader.moveReaderIndex(forwardBy: whitespace)
-                let object = try parseObject()
-                return .object(object)
+                return try parseObject()
             case ._openbracket:
                 reader.moveReaderIndex(forwardBy: whitespace)
-                let array = try parseArray()
-                return .array(array)
+                return try parseArray()
             case UInt8(ascii: "f"), UInt8(ascii: "t"):
                 reader.moveReaderIndex(forwardBy: whitespace)
                 let bool = try reader.readBool()
-                return .bool(bool)
+                return NSNumber(value: bool)
             case UInt8(ascii: "n"):
                 reader.moveReaderIndex(forwardBy: whitespace)
                 try reader.readNull()
-                return .null
+                return NSNull()
             case UInt8(ascii: "-"), UInt8(ascii: "0") ... UInt8(ascii: "9"):
                 reader.moveReaderIndex(forwardBy: whitespace)
-                let number = try self.reader.readNumber()
-                return .number(number)
+                let string = try self.reader.readNumber()
+                guard let number = NSNumber.fromJSONNumber(string) else {
+                    // parse() throws for this number, so the placeholder is never returned
+                    if unrepresentableNumber == nil {
+                        unrepresentableNumber = string
+                    }
+                    return NSNull()
+                }
+                return number
             case ._space, ._return, ._newline, ._tab:
                 whitespace += 1
                 continue
@@ -88,13 +111,15 @@ internal struct JSONParser {
 
     // MARK: - Parse Array -
 
-    mutating func parseArray() throws -> [JSONValue] {
+    mutating func parseArray() throws -> Any {
         precondition(self.reader.read() == ._openbracket)
         guard self.depth < 512 else {
             throw JSONError.tooManyNestedArraysOrDictionaries(characterIndex: self.reader.readerIndex - 1)
         }
         self.depth += 1
         defer { depth -= 1 }
+
+        let base = self.valueStack.count
 
         // parse first value or end immediately
         switch try reader.consumeWhitespace() {
@@ -103,17 +128,15 @@ internal struct JSONParser {
         case ._closebracket:
             // if the first char after whitespace is a closing bracket, we found an empty array
             self.reader.moveReaderIndex(forwardBy: 1)
-            return []
+            return self.popArray(from: base)
         default:
             break
         }
 
-        var array = [JSONValue]()
-
         // parse values
         while true {
             let value = try parseValue()
-            array.append(value)
+            self.valueStack.append(value)
 
             // consume the whitespace after the value before the comma
             let ascii = try reader.consumeWhitespace()
@@ -122,7 +145,7 @@ internal struct JSONParser {
                 preconditionFailure("Expected that all white space is consumed")
             case ._closebracket:
                 reader.moveReaderIndex(forwardBy: 1)
-                return array
+                return self.popArray(from: base)
             case ._comma:
                 // consume the comma
                 reader.moveReaderIndex(forwardBy: 1)
@@ -130,7 +153,7 @@ internal struct JSONParser {
                 if try reader.consumeWhitespace() == ._closebracket {
                     // the foundation json implementation does support trailing commas
                     reader.moveReaderIndex(forwardBy: 1)
-                    return array
+                    return self.popArray(from: base)
                 }
                 continue
             default:
@@ -141,13 +164,15 @@ internal struct JSONParser {
 
     // MARK: - Object parsing -
 
-    mutating func parseObject() throws -> [String: JSONValue] {
+    mutating func parseObject() throws -> Any {
         precondition(self.reader.read() == ._openbrace)
         guard self.depth < 512 else {
             throw JSONError.tooManyNestedArraysOrDictionaries(characterIndex: self.reader.readerIndex - 1)
         }
         self.depth += 1
         defer { depth -= 1 }
+
+        let base = self.memberStack.count
 
         // parse first value or end immediately
         switch try reader.consumeWhitespace() {
@@ -156,12 +181,10 @@ internal struct JSONParser {
         case ._closebrace:
             // if the first char after whitespace is a closing bracket, we found an empty array
             self.reader.moveReaderIndex(forwardBy: 1)
-            return [:]
+            return self.popObject(from: base)
         default:
             break
         }
-
-        var object = [String: JSONValue]()
 
         while true {
             let key = try reader.readString()
@@ -171,25 +194,49 @@ internal struct JSONParser {
             }
             reader.moveReaderIndex(forwardBy: 1)
             try reader.consumeWhitespace()
-            object[key] = try self.parseValue()
+            self.memberStack.append((key, try self.parseValue()))
 
             let commaOrBrace = try reader.consumeWhitespace()
             switch commaOrBrace {
             case ._closebrace:
                 reader.moveReaderIndex(forwardBy: 1)
-                return object
+                return self.popObject(from: base)
             case ._comma:
                 reader.moveReaderIndex(forwardBy: 1)
                 if try reader.consumeWhitespace() == ._closebrace {
                     // the foundation json implementation does support trailing commas
                     reader.moveReaderIndex(forwardBy: 1)
-                    return object
+                    return self.popObject(from: base)
                 }
                 continue
             default:
                 throw JSONError.unexpectedCharacter(ascii: commaOrBrace, characterIndex: reader.readerIndex)
             }
         }
+    }
+}
+
+extension JSONParser {
+    private mutating func popArray(from base: Int) -> Any {
+        let array = Array(self.valueStack[base...])
+        self.valueStack.removeSubrange(base...)
+        if options.contains(.mutableContainers) {
+            return NSMutableArray(array: array, copyItems: false)
+        }
+        return array
+    }
+
+    private mutating func popObject(from base: Int) -> Any {
+        var object = [String: Any](minimumCapacity: self.memberStack.count - base)
+        for (key, value) in self.memberStack[base...] {
+            // later duplicates replace earlier ones
+            object[key] = value
+        }
+        self.memberStack.removeSubrange(base...)
+        if options.contains(.mutableContainers) {
+            return NSMutableDictionary(dictionary: object, copyItems: false)
+        }
+        return object
     }
 }
 
