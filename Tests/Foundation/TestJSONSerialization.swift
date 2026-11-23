@@ -58,6 +58,16 @@ extension TestJSONSerialization {
         }
     }
 
+    func test_JSONObjectWithData_objectCapacityFitsMembers() throws {
+        // Each object gets the smallest table that holds its members, however many members other objects have.
+        let subject = Data(#"[{"a":1},{"a":1,"b":2},{"a":1,"b":2,"c":3,"d":4},{"a":{"b":{}}}]"#.utf8)
+        let objects = try XCTUnwrap(JSONSerialization.jsonObject(with: subject, options: []) as? [[String: Any]])
+        let nested = try XCTUnwrap(objects[3]["a"] as? [String: Any])
+        for object in objects + [nested] {
+            XCTAssertEqual(object.capacity, [String: Any](minimumCapacity: object.count).capacity, "\(object)")
+        }
+    }
+
 }
 
 //MARK: - JSONDeserialization
